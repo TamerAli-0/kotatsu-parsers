@@ -104,6 +104,35 @@ internal class NHentaiParser(context: MangaLoaderContext) :
 		}
 	}
 
+	// nhentai migrated to Svelte SSR which injects <!--[!--><!--]--> comment markers inside span.name.
+	// The base class uses .html().substringBefore("<") / .html().substringBefore("<span") which
+	// returns "" or raw comment text. Use .text() instead — Jsoup strips comments automatically.
+	override suspend fun getDetails(manga: Manga): Manga {
+		val doc = webClient.httpGet(manga.url.toAbsoluteUrl(domain)).parseHtml()
+		val urlChapters = doc.selectFirstOrThrow(selectUrlChapter).attr("href")
+		val tag = doc.selectFirst(selectTag)?.parseTags()
+		val branch = doc.select(selectLanguageChapter).joinToString(separator = " / ") { it.text() }
+		val author = doc.selectFirst(selectAuthor)?.text()?.trim()?.ifEmpty { null }
+		return manga.copy(
+			tags = tag.orEmpty(),
+			title = doc.selectFirst(selectTitle)?.textOrNull()?.cleanupTitle() ?: manga.title,
+			authors = setOfNotNull(author),
+			chapters = listOf(
+				MangaChapter(
+					id = manga.id,
+					title = manga.title,
+					number = 1f,
+					volume = 0,
+					url = urlChapters,
+					scanlator = null,
+					uploadDate = 0,
+					branch = branch,
+					source = source,
+				),
+			),
+		)
+	}
+
 	override suspend fun getPageUrl(page: MangaPage): String {
 		val doc = webClient.httpGet(page.url.toAbsoluteUrl(domain)).parseHtml()
 		val root = doc.body()

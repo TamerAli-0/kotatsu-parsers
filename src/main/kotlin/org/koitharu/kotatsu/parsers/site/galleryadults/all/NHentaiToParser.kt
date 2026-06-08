@@ -26,7 +26,7 @@ internal class NHentaiToParser(context: MangaLoaderContext) :
 	override val idImg = "image-container"
 
 	override val availableSortOrders: Set<SortOrder> =
-		EnumSet.of(SortOrder.UPDATED)
+		EnumSet.of(SortOrder.UPDATED, SortOrder.POPULARITY, SortOrder.POPULARITY_TODAY, SortOrder.POPULARITY_WEEK)
 
 	override val filterCapabilities: MangaListFilterCapabilities
 		get() = super.filterCapabilities.copy(
@@ -42,28 +42,45 @@ internal class NHentaiToParser(context: MangaLoaderContext) :
 			append("https://")
 			append(domain)
 			when {
-				filter.tags.isEmpty() && filter.locale == null -> {
-					append("/search/?q=")
-					append(if (filter.query.isNullOrEmpty()) "" else filter.query.urlEncoded())
+				!filter.query.isNullOrEmpty() -> {
+					append("/search?q=")
+					append(filter.query.urlEncoded())
 					append("&")
 				}
-
 				else -> {
 					val tag = filter.tags.oneOrThrowIfMany()
 					val lang = filter.locale
 					if (tag != null && lang != null) {
 						throw IllegalArgumentException(ErrorMessages.FILTER_BOTH_LOCALE_GENRES_NOT_SUPPORTED)
 					}
-					if (tag != null) {
-						append("/tag/")
-						append(tag.key)
-						append("/?")
-					} else if (filter.locale != null) {
-						append("/language/")
-						append(filter.locale.toLanguagePath())
-						append("/?")
-					} else {
-						append("/?")
+					when {
+						tag != null -> {
+							append("/tag/${tag.key}/")
+							when (order) {
+								SortOrder.POPULARITY -> append("?sort=popular&")
+								SortOrder.POPULARITY_TODAY -> append("?sort=popular-today&")
+								SortOrder.POPULARITY_WEEK -> append("?sort=popular-week&")
+								else -> append("?")
+							}
+						}
+						lang != null -> {
+							append("/language/${lang.toLanguagePath()}/")
+							when (order) {
+								SortOrder.POPULARITY -> append("?sort=popular&")
+								SortOrder.POPULARITY_TODAY -> append("?sort=popular-today&")
+								SortOrder.POPULARITY_WEEK -> append("?sort=popular-week&")
+								else -> append("?")
+							}
+						}
+						else -> {
+							// /go is the real gallery listing; / is just a marketing landing page
+							when (order) {
+								SortOrder.POPULARITY -> append("/go?sort=popular&")
+								SortOrder.POPULARITY_TODAY -> append("/go?sort=popular-today&")
+								SortOrder.POPULARITY_WEEK -> append("/go?sort=popular-week&")
+								else -> append("/go?")
+							}
+						}
 					}
 				}
 			}
@@ -74,9 +91,35 @@ internal class NHentaiToParser(context: MangaLoaderContext) :
 		return parseMangaList(webClient.httpGet(url).parseHtml())
 	}
 
+	override suspend fun getDetails(manga: Manga): Manga {
+		val doc = webClient.httpGet(manga.url.toAbsoluteUrl(domain)).parseHtml()
+		val urlChapters = doc.selectFirstOrThrow(selectUrlChapter).attr("href")
+		val tag = doc.selectFirst(selectTag)?.parseTags()
+		val branch = doc.select(selectLanguageChapter).joinToString(separator = " / ") { it.text() }
+		val author = doc.selectFirst(selectAuthor)?.text()?.trim()?.ifEmpty { null }
+		return manga.copy(
+			tags = tag.orEmpty(),
+			title = doc.selectFirst(selectTitle)?.textOrNull()?.cleanupTitle() ?: manga.title,
+			authors = setOfNotNull(author),
+			chapters = listOf(
+				MangaChapter(
+					id = manga.id,
+					title = manga.title,
+					number = 1f,
+					volume = 0,
+					url = urlChapters,
+					scanlator = null,
+					uploadDate = 0,
+					branch = branch,
+					source = source,
+				),
+			),
+		)
+	}
+
 	override fun parseMangaList(doc: Document): List<Manga> {
-		return doc.select(selectGallery).map { div ->
-			val href = div.selectFirstOrThrow(selectGalleryLink).attrAsRelativeUrl("href")
+		return doc.select(selectGallery).mapNotNull { div ->
+			val href = div.selectFirst(selectGalleryLink)?.attrAsRelativeUrl("href") ?: return@mapNotNull null
 			Manga(
 				id = generateUid(href),
 				title = div.select(selectGalleryTitle).text().cleanupTitle(),
@@ -85,7 +128,7 @@ internal class NHentaiToParser(context: MangaLoaderContext) :
 				publicUrl = href.toAbsoluteUrl(domain),
 				rating = RATING_UNKNOWN,
 				contentRating = ContentRating.ADULT,
-				coverUrl = div.selectFirstOrThrow(selectGalleryImg).src(),
+				coverUrl = div.selectFirst(selectGalleryImg)?.src().orEmpty(),
 				tags = emptySet(),
 				state = null,
 				authors = emptySet(),
