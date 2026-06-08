@@ -6,6 +6,7 @@ import org.koitharu.kotatsu.parsers.MangaLoaderContext
 import org.koitharu.kotatsu.parsers.MangaSourceParser
 import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.core.PagedMangaParser
+import okhttp3.Headers
 import org.koitharu.kotatsu.parsers.model.*
 import org.koitharu.kotatsu.parsers.util.*
 import java.text.SimpleDateFormat
@@ -37,60 +38,60 @@ internal class MangaGeko(context: MangaLoaderContext) :
 	}
 
 	override suspend fun getListPage(page: Int, order: SortOrder, filter: MangaListFilter): List<Manga> {
-		val url = buildString {
-			append("https://")
-			append(domain)
-			when {
-				!filter.query.isNullOrEmpty() -> {
-					if (page > 1) {
-						return emptyList()
-					}
-					append("/search/?search=")
-					append(filter.query.urlEncoded())
-				}
-
-				else -> {
-
-					append("/browse-comics/?results=")
-					append(page)
-
-					if (filter.tags.isNotEmpty()) {
-						append("&tags_include=")
-						append(filter.tags.joinToString(separator = ",") { it.key })
-					}
-
-					if (filter.tagsExclude.isNotEmpty()) {
-						append("&tags_exclude=")
-						append(filter.tagsExclude.joinToString(separator = ",") { it.key })
-					}
-
-					append("&filter=")
-					when (order) {
-						SortOrder.POPULARITY -> append("views")
-						SortOrder.UPDATED -> append("Updated")
-						SortOrder.NEWEST -> append("New")
-						// SortOrder.RANDOM -> append("Random")
-						else -> append("Updated")
-					}
-				}
+		if (!filter.query.isNullOrEmpty()) {
+			if (page > 1) return emptyList()
+			val url = "https://$domain/search/?search=${filter.query.urlEncoded()}"
+			val doc = webClient.httpGet(url).parseHtml()
+			return doc.select("li.novel-item").map { div ->
+				val href = div.selectFirstOrThrow("a").attrAsRelativeUrl("href")
+				Manga(
+					id = generateUid(href),
+					title = div.selectFirstOrThrow("h4").text(),
+					altTitles = emptySet(),
+					url = href,
+					publicUrl = href.toAbsoluteUrl(domain),
+					rating = RATING_UNKNOWN,
+					contentRating = null,
+					coverUrl = div.selectFirstOrThrow("img").src(),
+					tags = emptySet(),
+					state = null,
+					authors = emptySet(),
+					source = source,
+				)
 			}
 		}
-		val doc = webClient.httpGet(url).parseHtml()
-		return doc.select("li.novel-item").map { div ->
-			val href = div.selectFirstOrThrow("a").attrAsRelativeUrl("href")
-			val author = div.selectFirstOrThrow("h6").text().removePrefix("Author(S): ").nullIfEmpty()
+		val ordering = when (order) {
+			SortOrder.POPULARITY -> "-views"
+			SortOrder.UPDATED -> "-last_upload"
+			SortOrder.NEWEST -> "-created_at"
+			else -> "-views"
+		}
+		val url = "https://$domain/browse-comics/data/?page=$page&ordering=$ordering"
+		val headers = Headers.Builder()
+			.add("X-Requested-With", "XMLHttpRequest")
+			.add("Accept", "application/json, text/plain, */*")
+			.build()
+		val json = webClient.httpGet(url, headers).parseJson()
+		val html = json.getString("results_html")
+		val doc = org.jsoup.Jsoup.parse(html, "https://$domain")
+		return doc.select("article.comic-card").mapNotNull { el ->
+			val titleEl = el.selectFirst(".comic-card__title a") ?: return@mapNotNull null
+			val href = titleEl.attrAsRelativeUrl("href")
+			val title = titleEl.text().trim()
+			if (title.isBlank()) return@mapNotNull null
+			val cover = el.selectFirst(".comic-card__cover img")?.src()
 			Manga(
 				id = generateUid(href),
-				title = div.selectFirstOrThrow("h4").text(),
+				title = title,
 				altTitles = emptySet(),
 				url = href,
 				publicUrl = href.toAbsoluteUrl(domain),
 				rating = RATING_UNKNOWN,
 				contentRating = null,
-				coverUrl = div.selectFirstOrThrow("img").src(),
+				coverUrl = cover,
 				tags = emptySet(),
 				state = null,
-				authors = setOfNotNull(author),
+				authors = emptySet(),
 				source = source,
 			)
 		}
